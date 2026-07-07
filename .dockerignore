@@ -1,0 +1,32 @@
+# Dependencies (reinstalled inside the image via npm ci)
+node_modules
+
+
+# Build output
+.next
+# docs/
+
+# Env & secrets — injected at runtime, never copied into the image
+.env
+.clerk
+
+
+# Version control & CI
+.git
+.gitignore
+.github
+
+# Docker
+Dockerfile
+.dockerignore
+compose.yml
+compose.yaml
+docker-compose.yml
+
+
+
+# Misc
+README.md
+*.md
+# coverage
+# .turbo

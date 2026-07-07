@@ -1,0 +1,33 @@
+# Docker Compose for AskPDF.
+#
+# Usage:
+#   docker compose up --build            # run the app (uses your cloud MongoDB Atlas / Pinecone / Gemini / Clerk)
+#   docker compose --profile local-db up # also spin up a local MongoDB container
+#
+# All secrets are read from the project `.env` file:
+#   - Compose interpolates ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY} below (build arg, inlined at build time)
+#   - `env_file: .env` injects the rest at runtime (CLERK_SECRET_KEY, MONGODB_URI, GEMINI_API_KEY, PINECONE_API_KEY, ...)
+
+services:
+  app:
+    # On the VM, `docker compose pull app` pulls this pre-built image from Docker
+    # Hub (pushed by the CI/CD workflow). Locally, `up --build` builds and tags it
+    # as the same name. Override with APP_IMAGE in .env if your repo differs.
+    image: ${APP_IMAGE:-bharateshpoojary/askpdf:latest}
+    build:
+      context: .
+      args:
+        # NEXT_PUBLIC_* is baked into the client bundle during `next build`.
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+    container_name: askpdf
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+    restart: unless-stopped
+ 
+
+
