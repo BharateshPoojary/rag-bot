@@ -3,17 +3,28 @@ import { TaskType } from "@google/generative-ai";
 import { Pinecone } from "@pinecone-database/pinecone";
 import { PineconeStore } from "@langchain/pinecone";
 
-const pc = new Pinecone({
-  apiKey: process.env.PINECONE_API_KEY as string,
-}); //creating a new pinecone instance and giving api key as argument so that we can create a new pinecone client and we can interact with our pine cone db
+// Lazily create the Pinecone client on first use rather than at module load.
+// The Pinecone constructor validates PINECONE_API_KEY immediately, but that env
+// var isn't present during `next build` (it's a runtime-only secret). Creating
+// the client at import time would therefore crash the build when Next collects
+// route data. Memoised so we still reuse a single client at runtime.
+let pc: Pinecone | null = null;
+function getPineconeClient() {
+  if (!pc) {
+    pc = new Pinecone({
+      apiKey: process.env.PINECONE_API_KEY as string,
+    });
+  }
+  return pc;
+}
 export async function embedAndStoreDocs( // @ts-expect-error docs type error
   chunkedDocs: Document<Record<string, string>>[] //this function will accept array of Documents i.e array of chunked docs which  we made using text splitter
 ) {
   try {
-    const index = pc.index("bharat-llm"); // Accesses a Pinecone index named "bharat-llm" An index in Pinecone is similar to a collection or table where vector embeddings are stored and searched.
+    const index = getPineconeClient().index("bharat-llm"); // Accesses a Pinecone index named "bharat-llm" An index in Pinecone is similar to a collection or table where vector embeddings are stored and searched.
     const embeddings = new GoogleGenerativeAIEmbeddings({
       //Creates an instance for generating embeddings using the Gemini model.
-      modelName: "embedding-001", // Specifies the model name for embedding generation.
+      modelName: "gemini-embedding-001", // Specifies the model name for embedding generation.
       taskType: TaskType.RETRIEVAL_DOCUMENT, //this indicate the type of task the embeddings will be used RETRIEVAL_DOCUMENT means this will be used for matching or retrieving the document based on similarity like  RETRIEVAL_DOCUMENT helps generate embeddings optimized for finding the most relevant document based on a query.
       // title: "Document title",/title provides context or metadata about the content being embedded. It can help model to improve the quality of embeddings It is optional
       apiKey: process.env.GEMINI_API_KEY as string, //passing the gemini api key
@@ -39,12 +50,12 @@ export async function embedAndStoreDocs( // @ts-expect-error docs type error
 export async function getVectorStore() {
   try {
     const embeddings = new GoogleGenerativeAIEmbeddings({
-      modelName: "embedding-001",
+      modelName: "gemini-embedding-001",
       taskType: TaskType.RETRIEVAL_DOCUMENT,
       title: "Document title",
       apiKey: process.env.GEMINI_API_KEY as string,
     }); //This is the embedding model which we are using
-    const index = pc.index("bharat-llm"); //This is the index which we need
+    const index = getPineconeClient().index("bharat-llm"); //This is the index which we need
     await new Promise((resolve) => setTimeout(resolve, 500)); // Add a small delay This is likely added to avoid rate-limiting issues or to ensure the index is ready before proceeding.
     //To get the store which has embeddings
     const vectorStore = await PineconeStore.fromExistingIndex(embeddings, {

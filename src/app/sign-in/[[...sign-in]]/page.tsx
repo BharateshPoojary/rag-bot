@@ -110,6 +110,13 @@ export default function SignInForm() {
               />
             </div>
           </div>
+
+          <div
+            id="clerk-captcha"
+            data-cl-theme="dark"
+            data-cl-size="flexible"
+          />
+
           <Button
             type="submit"
             className="w-full bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white transition-all duration-200 shadow-md hover:shadow-lg"

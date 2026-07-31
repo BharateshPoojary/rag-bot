@@ -2,21 +2,25 @@ import Balancer from "react-wrap-balancer";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const convertNewLines = (text: string) =>
-  text.split("\n").map((line, i) => (
+  text.split("\n").map((line, i, arr) => (
     <span key={i}>
       {line}
-      <br />
+      {i < arr.length - 1 && <br />}
     </span>
   ));
 
 export function ChatLine({
   role = "assistant",
   content,
+  showCursor = false,
 }: {
   role: string;
   content: string;
+  showCursor?: boolean;
 }) {
-  if (!content) {
+  // Render even with empty content while the cursor is showing, so the
+  // "thinking" dot appears before the first token arrives.
+  if (!content && !showCursor) {
     return null;
   }
   const formattedMessage = convertNewLines(content);
@@ -36,7 +40,12 @@ export function ChatLine({
           </CardTitle>
         </CardHeader>
         <CardContent className="text-md">
-          <Balancer>{formattedMessage}</Balancer>
+          <Balancer>
+            {formattedMessage}
+            {showCursor && (
+              <span className="ml-1 inline-block h-3 w-3 rounded-full bg-purple-500 align-middle animate-pulse" />
+            )}
+          </Balancer>
         </CardContent>
       </Card>
     </div>

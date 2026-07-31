@@ -23,6 +23,7 @@ const ChatItemSchema = new Schema<ChatItem>({
 export interface Chat extends Document {
   chatId: string;
   useremail: string;
+  userType: "guest" | "authenticated";
   ArrayOfChats: ChatItem[];
 }
 
@@ -30,6 +31,14 @@ const ChatSchema = new Schema<Chat>(
   {
     chatId: { type: String, required: true },
     useremail: { type: String, required: true },
+    // Distinguishes ephemeral guest sessions from registered users. Guest
+    // documents are still persisted, but a returning guest gets a brand-new
+    // identity so they never load these back.
+    userType: {
+      type: String,
+      enum: ["guest", "authenticated"],
+      default: "authenticated",
+    },
     ArrayOfChats: { type: [ChatItemSchema], default: [] },
   },
   { timestamps: true }

@@ -1,5 +1,5 @@
 import { getVectorStore } from "./gemini-embeddings";
-import { streamingModel, nonStreamingModel } from "./llm";
+import { getStreamingModel, getNonStreamingModel } from "./llm";
 import { STANDALONE_QUESTION_TEMPLATE, QA_TEMPLATE } from "./prompt-template";
 import {
   ChatPromptTemplate,
@@ -11,7 +11,8 @@ import { HumanMessage, AIMessage } from "@langchain/core/messages";
 
 type CallChainArgs = {
   question: string;
-  pdfId?: string;
+  userId: string;
+  chatId: string;
   chatHistory: string;
 };
 
@@ -27,14 +28,27 @@ function formatChatHistory(chatHistory: string) {
   );
 }
 
+// Wraps a fixed message (greetings, errors, "no context found") as a one-chunk
+// stream so callChain always returns the same streamable shape as the LLM path.
+function stringToStream(text: string): ReadableStream<string> {
+  return new ReadableStream<string>({
+    start(controller) {
+      controller.enqueue(text);
+      controller.close();
+    },
+  });
+}
+
 export async function callChain({
   question,
-  pdfId,
+  userId,
+  chatId,
   chatHistory,
 }: CallChainArgs) {
   try {
     console.log("Question:", question);
-    console.log("PDF ID:", pdfId);
+    console.log("User ID:", userId);
+    console.log("Chat ID:", chatId);
 
     const sanitizedQuestion = question.trim().replace(/\n/g, " ");
     console.log("Sanitized question:", sanitizedQuestion);
@@ -44,10 +58,9 @@ export async function callChain({
     // const UNRELATED_REGEX = /^(do you know about|tell me about something|what is the weather|who is the president)/i
 
     if (GREETING_REGEX.test(sanitizedQuestion)) {
-      return {
-        context: [],
-        answer: "Hello! How can I assist you with your PDF document?",
-      };
+      return stringToStream(
+        "Hello! How can I assist you with your PDF document?"
+      );
     }
 
     // if (!pdfId) {
@@ -72,11 +85,9 @@ export async function callChain({
 
     if (!vectorStore) {
       console.error("Vector store not available");
-      return {
-        context: [],
-        answer:
-          "Sorry, there was an issue accessing the document database. Please try again.",
-      };
+      return stringToStream(
+        "Sorry, there was an issue accessing the document database. Please try again."
+      );
     }
 
     const formattedChatHistory = formatChatHistory(chatHistory);
@@ -88,10 +99,19 @@ export async function callChain({
       ["human", "{input}"],
     ]);
 
+    // Isolate retrieval to THIS user's PDFs in THIS chat. Without this filter
+    // the search spans every vector in the index (all PDFs, chats and users),
+    // which is why answers leaked across PDFs and across users.
+    const retrievalFilter = {
+      userId: { $eq: userId },
+      chatId: { $eq: chatId },
+    };
+    console.log("Retrieval filter:", retrievalFilter);
+
     console.log("Creating history-aware retriever...");
     const historyAwareRetriever = await createHistoryAwareRetriever({
-      llm: nonStreamingModel,
-      retriever: vectorStore.asRetriever(10),
+      llm: getNonStreamingModel(),
+      retriever: vectorStore.asRetriever(10, retrievalFilter),
       rephrasePrompt: contextualizeQPrompt,
     });
     console.log("History Aware Retriever", historyAwareRetriever);
@@ -103,16 +123,13 @@ export async function callChain({
 
     console.log("Retrieved documents count:", retrievedDocuments.length);
 
+    // The retriever is filtered by userId + chatId, so an empty result means
+    // this chat has no PDF vectors at all — i.e. the user hasn't uploaded one.
     if (!retrievedDocuments || retrievedDocuments.length === 0) {
-      console.warn(
-        "No relevant documents found for question:",
-        sanitizedQuestion
+      console.warn("No PDF vectors found for this chat:", chatId);
+      return stringToStream(
+        "You haven't uploaded a PDF in this chat yet. Please upload a PDF using the + button, then ask your question about it."
       );
-      return {
-        context: [],
-        answer:
-          "I couldn't find relevant information in the uploaded PDF to answer your question. Please try rephrasing your question or ensure the PDF contains the information you're looking for.",
-      };
     }
 
     // const contextMessages = retrievedDocuments.map(
@@ -127,56 +144,39 @@ export async function callChain({
     ]);
 
     const QAChain = await createStuffDocumentsChain({
-      llm: streamingModel,
+      llm: getStreamingModel(),
       prompt: qaPrompt,
     });
     console.log("Retrieved Docs", retrievedDocuments);
-    // console.log("Conetxt Model", contextMessages);
-    console.log("Invoking QA chain...");
+    console.log("Streaming QA chain...");
 
-    const result = await QAChain.invoke({
+    // Stream the answer token-by-token. Retrieval above already finished, so
+    // only the LLM generation streams — which is what the user sees appear
+    // progressively in the UI.
+    const stream = await QAChain.stream({
       context: retrievedDocuments,
       input: sanitizedQuestion,
     });
 
-    console.log("QA chain result:", result);
-
-    if (!result) {
-      return {
-        context: retrievedDocuments,
-        answer:
-          "I encountered an issue generating a response. Please try asking your question differently.",
-      };
-    }
-
-    return {
-      context: retrievedDocuments,
-      answer: result,
-    };
+    return stream;
   } catch (error) {
     console.error("Error in callChain:", error);
 
     if (error instanceof Error) {
       if (error.message.includes("vector store")) {
-        return {
-          context: [],
-          answer:
-            "There was an issue accessing the document database. Please ensure your PDF was uploaded successfully.",
-        };
+        return stringToStream(
+          "There was an issue accessing the document database. Please ensure your PDF was uploaded successfully."
+        );
       }
       if (error.message.includes("retriever")) {
-        return {
-          context: [],
-          answer:
-            "I couldn't retrieve relevant information from your PDF. Please try a different question.",
-        };
+        return stringToStream(
+          "I couldn't retrieve relevant information from your PDF. Please try a different question."
+        );
       }
     }
 
-    return {
-      context: [],
-      answer:
-        "I encountered an unexpected error. Please try again or rephrase your question.",
-    };
+    return stringToStream(
+      "I encountered an unexpected error. Please try again or rephrase your question."
+    );
   }
 }
