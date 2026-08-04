@@ -1,7 +1,7 @@
 "use client";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Loader, Loader2, Plus, Send } from "lucide-react";
 import { toast } from "sonner";
@@ -11,37 +11,52 @@ import { ChatLine } from "@/components/chat-line";
 
 import { scrollToBottom } from "@/lib/utils";
 import { useParams, useSearchParams } from "next/navigation";
-import {
-  addBulkIds,
-  addMessage,
-  setChatId,
-  setChatNumber,
-} from "@/lib/features/ChatData";
-import { useDispatch, useSelector } from "react-redux";
+import { setChatId } from "@/lib/features/ChatData";
+import { useDispatch } from "react-redux";
 import { Chat, setHistory } from "@/lib/features/Chat";
-import { SignedIn, useClerk, useUser } from "@clerk/nextjs";
-import { RootState } from "@/lib/store";
+import { SignedIn, SignedOut, useClerk, useUser } from "@clerk/nextjs";
+import Link from "next/link";
 import { ApiResponse } from "@/types/ApiResponse";
+import { getGuestId } from "@/lib/guest";
 
 const ChatInput = () => {
-  const { isSignedIn, user } = useUser();
-  let userEmail: string = "";
+  const { isLoaded, isSignedIn, user } = useUser();
 
+  // Auth is optional. Once Clerk has loaded and there's no session, we mint a
+  // per-session guest id (see lib/guest) that stands in for the user's email in
+  // Mongo and for the Clerk userId in the vector store.
+  const [guestId, setGuestId] = useState<string>("");
+  useEffect(() => {
+    if (isLoaded && !isSignedIn) {
+      setGuestId(getGuestId());
+    }
+  }, [isLoaded, isSignedIn]);
+
+  const isGuest = isLoaded && !isSignedIn;
+  let userEmail: string = "";
   if (isSignedIn) {
     console.log("User", user.emailAddresses[0].emailAddress);
     userEmail = user.emailAddresses[0].emailAddress;
+  } else {
+    userEmail = guestId;
   }
+  const userType: "guest" | "authenticated" = isSignedIn
+    ? "authenticated"
+    : "guest";
 
   const dispatch = useDispatch();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const uploadRef = useRef<HTMLInputElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Message ids already saved to the DB for this chat. Kept in a ref so the
+  // auto-persist effect writes each message exactly once (no duplicate sidebar
+  // entries). It naturally resets when the component remounts on navigation to
+  // a different chat.
+  const persistedIds = useRef<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const params = useParams<{ chatid: string }>();
   const searchParams = useSearchParams();
-  const [fileId, setFileId] = useState<string>();
-  const { bulkIds } = useSelector((state: RootState) => state.chatData);
   let search: string | null = null;
   if (searchParams.get("chatNumber")) {
     search = searchParams.get("chatNumber");
@@ -54,49 +69,40 @@ const ChatInput = () => {
     handleSubmit,
     setMessages,
     status,
-  } = useChat({
-    //useChat from vercel ai sdk to manage message state and all ai chatbot related activities
-    onResponse: async (response) => {
-      const data = await response.json();
-      if (data.content) {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: Date.now().toString(),
-            pdfId: fileId,
-            role: "assistant",
-            content: data.content,
-          },
-        ]);
-      }
-    },
-  });
+  } = useChat();
+  //useChat from vercel ai sdk manages message state and streams the assistant
+  //reply into `messages` token-by-token (the server returns the AI SDK data
+  //stream protocol), so the UI updates live as the answer is generated.
   // useEffect(() => {
   //   console.log("File Id", fileId)
   // }, [fileId])
   //here using useUser directly get user email and get its chat only like this authentiaction flow will be there
   
+  // Refresh the sidebar's conversation list from the DB. Shared by the mount
+  // effect and the auto-persist effect (so a newly saved exchange appears in the
+  // sidebar immediately).
+  const refreshHistory = useCallback(async () => {
+    if (!userEmail) return;
+    try {
+      const result = await axios.post("/api/getHistory", {
+        useremail: userEmail,
+      });
+      dispatch(setHistory(result.data.history as Chat[]));
+    } catch (error) {
+      const axiosError = error as AxiosError<ApiResponse>;
+      toast.error(axiosError.response?.data.message ?? "Something went wrong");
+    }
+  }, [userEmail, dispatch]);
+
   useEffect(() => {
     console.log("I am inside useEffect");
     dispatch(setChatId(params.chatid));
     console.log("params.chatId", params.chatid);
-    const getHistory = async () => {
-      try {
-        const result = await axios.post("/api/getHistory", {
-          useremail: userEmail,
-        });
-        console.log("User Email", userEmail);
-        const chats: Chat[] = result.data.history;
-        console.log("Chats for history", chats);
-        dispatch(setHistory(chats));
-      } catch (error) {
-        const axiosError = error as AxiosError<ApiResponse>;
-        toast.error(
-          axiosError.response?.data.message ?? "Something went wrong"
-        );
-      }
-    };
-    getHistory();
+    // Wait until we have an identity (a real email, or a minted guest id).
+    // A returning guest gets a fresh id, so history queries come back empty and
+    // they never see a previous visit's conversations.
+    if (!userEmail) return;
+    refreshHistory();
     const handleChat = async () => {
       try {
         const getChat = await axios.post("/api/getchat", {
@@ -106,10 +112,10 @@ const ChatInput = () => {
         if (Chats) {
           Chats.ArrayOfChats.map((eachchat) => {
             if (eachchat.chatNumber === search) {
+              // Mark already-saved messages as persisted BEFORE loading them, so
+              // the auto-persist effect never mistakes them for new and re-saves.
+              eachchat.messages.forEach((m) => persistedIds.current.add(m.id));
               setMessages(eachchat.messages);
-              dispatch(
-                addBulkIds(eachchat.messages.map((eachids) => eachids.id))
-              );
             }
           });
         }
@@ -121,23 +127,65 @@ const ChatInput = () => {
       }
     };
     handleChat();
-  }, [dispatch, setMessages, params.chatid, search, userEmail]);
+  }, [dispatch, setMessages, params.chatid, search, userEmail, refreshHistory]);
 
+  // Keep the view pinned to the newest content as it streams in.
   useEffect(() => {
     setTimeout(() => scrollToBottom(containerRef), 100);
-    const addMessagetoState = async () => {
-      if (messages.length > 0) {
-        const { id, role, content } = messages[messages.length - 1];
-        if (!bulkIds.includes(messages[messages.length - 1].id)) {
-          dispatch(addMessage({ id, role, content }));
-          if (search) {
-            dispatch(setChatNumber(search));
-          }
-        }
+  }, [messages]);
+
+  // Auto-persist each completed exchange straight to the DB. While streaming,
+  // useChat rewrites the last message on every token, so we wait for
+  // status === "ready" (request fully finished) before saving — otherwise we'd
+  // store partial text. persistedIds (a ref) tracks what's already saved so a
+  // conversation is written exactly once and every new reply appends to the
+  // SAME conversation instead of creating a duplicate sidebar entry.
+  useEffect(() => {
+    if (status !== "ready") return;
+    if (!userEmail) return;
+    const newMessages = messages.filter((m) => !persistedIds.current.has(m.id));
+    if (newMessages.length === 0) return;
+    newMessages.forEach((m) => persistedIds.current.add(m.id));
+
+    // A stable id for THIS conversation: the chatNumber when continuing an
+    // existing chat, otherwise the chat's URL id for a brand-new one.
+    const conversationNumber = search ?? params.chatid;
+    const persist = async () => {
+      try {
+        await axios.post("/api/savechat", {
+          chatId: params.chatid,
+          useremail: userEmail,
+          sidebarChatNumber: conversationNumber,
+          // searchparam forces savechat's append-to-existing path so replies
+          // accumulate in one conversation.
+          searchparam: conversationNumber,
+          messages: newMessages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            content: m.content,
+          })),
+          userType,
+        });
+        await refreshHistory();
+      } catch (error) {
+        // Un-mark so the next ready tick retries the save.
+        newMessages.forEach((m) => persistedIds.current.delete(m.id));
+        const axiosError = error as AxiosError<ApiResponse>;
+        toast.error(
+          axiosError.response?.data.message ?? "Failed to save chat"
+        );
       }
     };
-    addMessagetoState();
-  }, [dispatch, bulkIds, search, messages]);
+    persist();
+  }, [
+    status,
+    messages,
+    search,
+    params.chatid,
+    userEmail,
+    userType,
+    refreshHistory,
+  ]);
 
   const [isPDFUploading, setisPDFUploading] = useState(false);
   const [fileInfo, setFileInfo] = useState<{
@@ -160,12 +208,15 @@ const ChatInput = () => {
       size: file.size,
     });
     const generateFileId = Date.now().toString() + file.name;
-    setFileId(generateFileId);
     try {
       setisPDFUploading(true);
       const formPDFData = new FormData();
       formPDFData.append("pdfFile", file);
       formPDFData.append("pdfId", generateFileId);
+      formPDFData.append("chatId", params.chatid);
+      // Guests have no Clerk userId; send the session guest id so the server can
+      // scope the PDF's vectors to them (mirrors the /api/chat request below).
+      if (isGuest) formPDFData.append("guestId", guestId);
       const pdfUploadResponse = await axios.post("/api/upload", formPDFData, {
         headers: {
           "Content-Type": "multipart/form-data",
@@ -182,13 +233,19 @@ const ChatInput = () => {
     }
   };
 
+  // Every send must carry the chatId so the server can scope retrieval to the
+  // PDFs uploaded in this chat (see /api/chat + langchain retrieval filter).
+  const submitWithChatId = (e: React.FormEvent) =>
+    handleSubmit(e, {
+      data: { chatId: params.chatid, ...(isGuest ? { guestId } : {}) },
+    });
+
   const handleKeyDown = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (!input.trim()) return;
-      console.log("File Id ", fileId);
       try {
-        handleSubmit(e, { data: { pdfId: fileId as string } }); // handleSubmit should handle the server request
+        submitWithChatId(e); // handleSubmit should handle the server request
       } catch (error) {
         console.error("Failed to send message:", error);
       }
@@ -213,7 +270,14 @@ const ChatInput = () => {
           padding: 20,
         }}
       >
-        <h1 className="font-bold text-lg ">Bharat LLM App</h1>
+        <h1 className="font-bold text-lg ">AskPDF</h1>
+        <SignedOut>
+          <Link href="/sign-in">
+            <Button className="w-20 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white transition-all duration-200 shadow-md hover:shadow-lg">
+              Sign in
+            </Button>
+          </Link>
+        </SignedOut>
         <SignedIn>
           <Button
             className="w-20 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white transition-all duration-200 shadow-md hover:shadow-lg"
@@ -241,15 +305,33 @@ const ChatInput = () => {
 
   return (
     <SidebarProvider>
-      <AppSidebar useremail={userEmail} searchparam={search as string} />
+      {/* Highlight the conversation currently open: the chatNumber when
+          continuing an existing chat, else the fresh chat's URL id (which is
+          what auto-persist saves it under). */}
+      <AppSidebar searchparam={search ?? params.chatid} />
       <main className="w-full">
         <SidebarTrigger />
         <Header />
         <div className="flex flex-col " style={{ height: "calc(100% - 20px)" }}>
           <div className="p-6 overflow-y-auto flex-1 " ref={containerRef}>
-            {messages.map(({ id, role, content }: Message) => (
-              <ChatLine key={id} role={role} content={content} />
+            {messages.map(({ id, role, content }: Message, index) => (
+              <ChatLine
+                key={id}
+                role={role}
+                content={content}
+                // While streaming, the pulsing purple cursor follows the end of
+                // the last (assistant) message like ChatGPT.
+                showCursor={
+                  status === "streaming" &&
+                  index === messages.length - 1 &&
+                  role === "assistant"
+                }
+              />
             ))}
+            {/* Before the first token arrives, show a standalone "thinking" dot. */}
+            {status === "submitted" && (
+              <ChatLine role="assistant" content="" showCursor />
+            )}
           </div>
 
           <div className="w-full sm:w-1/2 bg-white p-2 border-t mx-auto sticky bottom-0">
@@ -275,7 +357,7 @@ const ChatInput = () => {
                 className="hidden"
               />
 
-              <form onSubmit={handleSubmit} className="flex w-full">
+              <form onSubmit={submitWithChatId} className="flex w-full">
                 <textarea
                   ref={inputRef}
                   value={input}

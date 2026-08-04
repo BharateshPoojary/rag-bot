@@ -9,12 +9,14 @@ export async function POST(request: Request) {
     sidebarChatNumber,
     searchparam,
     messages,
+    userType,
   }: {
     chatId: string;
     useremail: string;
     sidebarChatNumber: string;
     searchparam: string;
     messages: Message[];
+    userType?: "guest" | "authenticated";
   } = await request.json();
 
   await dbConnection();
@@ -36,7 +38,9 @@ export async function POST(request: Request) {
           },
           {
             $push: {
-              "ArrayOfChats.$.messages": messages,
+              // $each so each message is appended individually — without it the
+              // whole array would be stored as one nested element.
+              "ArrayOfChats.$.messages": { $each: messages },
             },
           }
         );
@@ -74,6 +78,7 @@ export async function POST(request: Request) {
     const saveChat = new ChatModel({
       chatId,
       useremail,
+      userType: userType ?? "authenticated",
       ArrayOfChats: [
         {
           chatNumber: sidebarChatNumber,
